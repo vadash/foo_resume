@@ -1,12 +1,10 @@
-name: Build and Package foo_resume
+name: Build x64 Windows component
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -14,49 +12,78 @@ jobs:
 
     steps:
     - name: Checkout foo_resume
-      uses: actions/checkout@v4
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       with:
         path: foo_resume
+        persist-credentials: false
 
-    - name: Checkout SDK
-      uses: actions/checkout@v4
-      with:
-        repository: reda777/fb2k-sdk
-        path: sdk
-        token: ${{ secrets.SDK_TOKEN }}
+    - name: Download and verify foobar2000 SDK
+      shell: pwsh
+      run: |
+        $uri = 'https://www.foobar2000.org/downloads/SDK-2025-03-07.7z'
+        $expectedHash = 'ccda3c5840e66e0e28a7e4fe36407c4e78581aa30c40c362a188fcbaae799a3e'
+        $archive = Join-Path $env:GITHUB_WORKSPACE 'sdk.7z'
+        Invoke-WebRequest -Uri $uri -OutFile $archive
+        $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -ne $expectedHash) {
+          throw "foobar2000 SDK SHA256 mismatch: $actualHash"
+        }
+        New-Item -ItemType Directory -Path sdk -Force | Out-Null
+        & 'C:\Program Files\7-Zip\7z.exe' x $archive '-osdk' -y | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+          throw "7-Zip failed with exit code $LASTEXITCODE"
+        }
 
     - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v2
-
-    - name: Create Out Directory
-      run: mkdir out
-    # ------------------------
-
-    - name: Build x86
-      working-directory: foo_resume
-      run: msbuild foo_resume.sln /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v143
+      uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
 
     - name: Build x64
       working-directory: foo_resume
-      run: msbuild foo_resume.sln /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
+      run: msbuild foo_resume.sln /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /m
 
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
+    - name: Verify x64 component package
+      shell: pwsh
+      run: |
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $package = Join-Path $env:GITHUB_WORKSPACE 'out\foo_resume.fb2k-component'
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($package)
+        try {
+          $entry = $zip.GetEntry('foo_resume/x64/foo_resume.dll')
+          if ($null -eq $entry) {
+            throw 'Package does not contain foo_resume/x64/foo_resume.dll'
+          }
+          $stream = $entry.Open()
+          try {
+            $header = [byte[]]::new(4096)
+            $read = 0
+            while ($read -lt $header.Length) {
+              $count = $stream.Read($header, $read, $header.Length - $read)
+              if ($count -eq 0) { break }
+              $read += $count
+            }
+            if ($read -lt 64) {
+              throw 'Component DLL header is truncated'
+            }
+            $peOffset = [BitConverter]::ToInt32($header, 0x3C)
+            if ($peOffset -lt 0 -or $peOffset + 6 -gt $read) {
+              throw 'Component DLL PE header is truncated'
+            }
+            $signature = [BitConverter]::ToUInt32($header, $peOffset)
+            $machine = [BitConverter]::ToUInt16($header, $peOffset + 4)
+            if ($signature -ne 0x00004550 -or $machine -ne 0x8664) {
+              throw "Expected x64 PE DLL, got signature 0x$($signature.ToString('X8')) and machine 0x$($machine.ToString('X4'))"
+            }
+          } finally {
+            $stream.Dispose()
+          }
+        } finally {
+          $zip.Dispose()
+        }
+        Get-FileHash -LiteralPath $package -Algorithm SHA256
+
+    - name: Upload x64 component
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
-        files: out/foo_resume.fb2k-component
-        tag_name: ${{ github.ref_name }}
-        name: Release ${{ github.ref_name }}
-        generate_release_notes: true
-        draft: false
-
-        prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
-
-        make_latest: ${{ !(contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc')) }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: foo_resume-package
+        name: foo_resume-x64
+        if-no-files-found: error
         path: out/foo_resume.fb2k-component
