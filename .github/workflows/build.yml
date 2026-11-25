@@ -48,9 +48,9 @@ jobs:
         $package = Join-Path $env:GITHUB_WORKSPACE 'out\foo_resume.fb2k-component'
         $zip = [System.IO.Compression.ZipFile]::OpenRead($package)
         try {
-          $entry = $zip.GetEntry('foo_resume/x64/foo_resume.dll')
+          $entry = $zip.GetEntry('x64/foo_resume.dll')
           if ($null -eq $entry) {
-            throw 'Package does not contain foo_resume/x64/foo_resume.dll'
+            throw 'Package does not contain x64/foo_resume.dll'
           }
           $stream = $entry.Open()
           try {
